@@ -13,27 +13,23 @@ from datetime import datetime
 from bson.objectid import ObjectId
 import datetime as dt
 import logging
+import aiohttp
 
 # Настройка логирования для диагностики
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-API_TOKEN = "токен_бота"
-ADMIN_ID = "айди_юзера"
-CHANNEL_ID = "ник_канала"
+API_TOKEN = "7652183042:AAHkGYirAKyb8iww0OAjQciL0MRHzbrtICQ"
+ADMIN_ID = 685600785
+CHANNEL_ID = "@rabota_minsk"
 
 # Подключение к MongoDB
 client = MongoClient("mongodb://localhost:27017/")
-db = client["vacancy_bot"]
+db = client["vacancy"]
 vacancies_collection = db["vacancies"]
 settings_collection = db["settings"]
 
-# Удаление старой коллекции vacancies при запуске
-vacancies_collection.drop()
-settings_collection.drop()
-logger.info("Старая коллекция 'vacancies' удалена. Начинаем с чистой базы.")
-
-# Инициализация инструкции по оплате в базе, если её нет
+# Инициализация инструкций
 if not settings_collection.find_one({"key": "payment_instructions"}):
     settings_collection.insert_one({
         "key": "payment_instructions",
@@ -46,6 +42,34 @@ if not settings_collection.find_one({"key": "payment_instructions"}):
             "Администратор в рабочее время проверит платеж и одобрит вашу вакансию\n"
             "По всем вопросам: @saskovets"
         )
+    })
+
+if not settings_collection.find_one({"key": "channel_instruction"}):
+    settings_collection.insert_one({
+        "key": "channel_instruction",
+        "value": (
+            "📌 Как разместить вакансию в канале\n"
+            "💬 Чтобы опубликовать вакансию, перейдите в нашего Telegram-бота и заполните анкету.\n"
+            "🤖 https://t.me/rabota_minsk_bot\n\n"
+            "Укажите следующую информацию:\n\n"
+            "1️⃣ Название вакансии\n"
+            "Краткое и понятное — чтобы сразу было видно, кого вы ищете.\n"
+            "2️⃣ Описание вакансии\n"
+            "Опишите, чем предстоит заниматься, какие нужны навыки и опыт.\n"
+            "3️⃣ Заработная плата\n"
+            "Укажите сумму в BYN — за день, месяц или смену.\n"
+            "4️⃣ Тип занятости\n"
+            "Например: подработка, полный день, график 2/2 и т.д.\n"
+            "5️⃣ Контакт для связи\n"
+            "Оставьте номер телефона или ник в Telegram (например, @username).\n\n"
+            "❗️ После заполнения анкеты бот предложит два варианта публикации:\n\n"
+            "🕟 Бесплатно — вакансия публикуется в порядке живой очереди. Ожидание может занять до 12 часов.\n"
+            "💵 Платно — вакансия будет опубликована максимально быстро. Стоимость размещения — 5 BYN.\n\n"
+            "🔎 Обратите внимание:\n"
+            "Каждая вакансия проходит предварительную модерацию. Сомнительные или подозрительные объявления будут отклонены."
+        ),
+        "button_text": "Перейти к боту",
+        "message_id": None
     })
 
 bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
@@ -61,8 +85,11 @@ class VacancyForm(StatesGroup):
     priority = State()
     payment_check = State()
     edit_payment = State()
+    edit_channel_instruction = State()
+    edit_channel_button = State()
 
 VACANCIES_PER_PAGE = 5
+MAX_MESSAGES_TO_DELETE = 50  # Ограничение на количество сообщений для удаления за раз
 
 async def send_and_log(chat_id, text, state, is_vacancy=False, **kwargs):
     try:
@@ -85,13 +112,63 @@ async def get_payment_instructions():
     setting = settings_collection.find_one({"key": "payment_instructions"})
     return setting["value"] if setting else "Инструкции по оплате не найдены."
 
+async def get_channel_instruction():
+    setting = settings_collection.find_one({"key": "channel_instruction"})
+    if setting:
+        return setting["value"], setting.get("button_text", "Перейти к боту"), setting.get("message_id")
+    return (
+        "📌 Как разместить вакансию в канале\n"
+        "💬 Чтобы опубликовать вакансию, перейдите в нашего Telegram-бота и заполните анкету.\n"
+        "🤖 https://t.me/rabota_minsk_bot\n\n"
+        "Укажите следующую информацию:\n\n"
+        "1️⃣ Название вакансии\n"
+        "Краткое и понятное — чтобы сразу было видно, кого вы ищете.\n"
+        "2️⃣ Описание вакансии\n"
+        "Опишите, чем предстоит заниматься, какие нужны навыки и опыт.\n"
+        "3️⃣ Заработная плата\n"
+        "Укажите сумму в BYN — за день, месяц или смену.\n"
+        "4️⃣ Тип занятости\n"
+        "Например: подработка, полный день, график 2/2 и т.д.\n"
+        "5️⃣ Контакт для связи\n"
+        "Оставьте номер телефона или ник в Telegram (например, @username).\n\n"
+        "❗️ После заполнения анкеты бот предложит два варианта публикации:\n\n"
+        "🕟 Бесплатно — вакансия публикуется в порядке живой очереди. Ожидание может занять до 12 часов.\n"
+        "💵 Платно — вакансия будет опубликована максимально быстро. Стоимость размещения — 5 BYN.\n\n"
+        "🔎 Обратите внимание:\n"
+        "Каждая вакансия проходит предварительную модерацию. Сомнительные или подозрительные объявления будут отклонены."
+    ), "Перейти к боту", None
+
+async def delete_messages(chat_id, messages, welcome_id, vacancy_messages):
+    messages_to_delete = messages.copy()
+    for msg in messages_to_delete:
+        bot_msg_id = msg.get("bot_msg_id") if isinstance(msg, dict) else None
+        user_msg_id = msg.get("user_msg_id") if isinstance(msg, dict) else None
+
+        if not bot_msg_id and isinstance(msg, int):
+            bot_msg_id = msg
+
+        if bot_msg_id and bot_msg_id != welcome_id:
+            try:
+                await bot.delete_message(chat_id, bot_msg_id)
+                logger.info(f"Удалено сообщение {bot_msg_id} из чата {chat_id}")
+                if user_msg_id:
+                    await bot.delete_message(chat_id, user_msg_id)
+                    logger.info(f"Удалено пользовательское сообщение {user_msg_id} из чата {chat_id}")
+            except Exception as e:
+                logger.warning(f"Не удалось удалить сообщение {bot_msg_id}: {e}")
+            finally:
+                if msg in messages:
+                    messages.remove(msg)
+
 @dp.message(F.text == "/start")
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     if message.from_user.id == ADMIN_ID:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="👀 Платежные инструкции", callback_data="view_payment")],
-            [InlineKeyboardButton(text="✏️ Изменить инструкции", callback_data="edit_payment")],
+            [InlineKeyboardButton(text="✏️ Изменить платежные инструкции", callback_data="edit_payment")],
+            [InlineKeyboardButton(text="📝 Инструкция в канале", callback_data="view_channel_instruction")],
+            [InlineKeyboardButton(text="📬 Опубликовать инструкцию в канале", callback_data="post_channel_instruction")],
             [InlineKeyboardButton(text="📤 Создать вакансию", callback_data="start_form")],
             [InlineKeyboardButton(text="📋 Все вакансии", callback_data="admin_view_vacancies|0")]
         ])
@@ -125,7 +202,9 @@ async def cmd_admin(message: Message, state: FSMContext):
     await state.clear()
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="👀 Платежные инструкции", callback_data="view_payment")],
-        [InlineKeyboardButton(text="✏️ Изменить инструкции", callback_data="edit_payment")],
+        [InlineKeyboardButton(text="✏️ Изменить платежные инструкции", callback_data="edit_payment")],
+        [InlineKeyboardButton(text="📝 Инструкция в канале", callback_data="view_channel_instruction")],
+        [InlineKeyboardButton(text="📬 Опубликовать инструкцию в канале", callback_data="post_channel_instruction")],
         [InlineKeyboardButton(text="📤 Создать вакансию", callback_data="start_form")],
         [InlineKeyboardButton(text="📋 Все вакансии", callback_data="admin_view_vacancies|0")]
     ])
@@ -140,7 +219,11 @@ async def cmd_admin(message: Message, state: FSMContext):
 @dp.message(F.text == "/my_vacancies")
 async def cmd_my_vacancies(message: Message, state: FSMContext):
     if message.from_user.id == ADMIN_ID:
-        await message.answer("Эта команда для пользователей. Используйте /admin.")
+        await send_and_log(
+            message.chat.id,
+            "Эта команда для пользователей. Используйте /admin.",
+            state
+        )
         return
     
     vacancies = list(vacancies_collection.find({"user_id": message.from_user.id}))
@@ -260,22 +343,98 @@ async def view_payment_instructions(callback: CallbackQuery, state: FSMContext):
         [InlineKeyboardButton(text="✏️ Изменить", callback_data="edit_payment")],
         [InlineKeyboardButton(text="🏠 Главное меню", callback_data="back_to_start")]
     ])
+    # Редактируем текущее сообщение, но добавим его в messages_to_delete перед редактированием
+    data = await state.get_data()
+    messages = data.get("messages_to_delete", [])
+    messages.append({"bot_msg_id": callback.message.message_id})
+    await state.update_data(messages_to_delete=messages)
+    
     await callback.message.edit_text(
         f"💸 <b>Текущие инструкции по оплате:</b>\n\n{instructions}",
         reply_markup=keyboard
     )
     await callback.answer()
 
+@dp.callback_query(F.data == "view_channel_instruction", F.from_user.id == ADMIN_ID)
+async def view_channel_instruction(callback: CallbackQuery, state: FSMContext):
+    instruction, button_text, message_id = await get_channel_instruction()
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✏️ Изменить текст", callback_data="edit_channel_instruction")],
+        [InlineKeyboardButton(text="🔗 Изменить кнопку", callback_data="edit_channel_button")],
+        [InlineKeyboardButton(text="📬 Опубликовать/Обновить", callback_data="post_channel_instruction")],
+        [InlineKeyboardButton(text="🏠 Главное меню", callback_data="back_to_start")]
+    ])
+    # Редактируем текущее сообщение, но добавим его в messages_to_delete перед редактированием
+    data = await state.get_data()
+    messages = data.get("messages_to_delete", [])
+    messages.append({"bot_msg_id": callback.message.message_id})
+    await state.update_data(messages_to_delete=messages)
+    
+    await callback.message.edit_text(
+        f"📢 <b>Инструкция для канала:</b>\n\n{instruction}\n\n"
+        f"🔗 <b>Текст кнопки:</b> {button_text}\n"
+        f"🆔 ID сообщения в канале: {message_id if message_id else 'Не опубликовано'}",
+        reply_markup=keyboard
+    )
+    await callback.answer()
+
 @dp.callback_query(F.data == "edit_payment", F.from_user.id == ADMIN_ID)
 async def start_edit_payment(callback: CallbackQuery, state: FSMContext):
+    instructions = await get_payment_instructions()
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🏠 Главное меню", callback_data="back_to_start")]
     ])
+    # Редактируем текущее сообщение, но добавим его в messages_to_delete перед редактированием
+    data = await state.get_data()
+    messages = data.get("messages_to_delete", [])
+    messages.append({"bot_msg_id": callback.message.message_id})
+    await state.update_data(messages_to_delete=messages)
+    
     await callback.message.edit_text(
-        "✏️ Введите новый текст инструкций по оплате (кнопка \"✅ Я оплатил\" будет добавлена автоматически):",
+        "✏️ Отредактируйте текст инструкций по оплате (кнопка \"✅ Я оплатил\" будет добавлена автоматически):\n\n"
+        f"{instructions}",
         reply_markup=keyboard
     )
     await state.set_state(VacancyForm.edit_payment)
+    await callback.answer()
+
+@dp.callback_query(F.data == "edit_channel_instruction", F.from_user.id == ADMIN_ID)
+async def start_edit_channel_instruction(callback: CallbackQuery, state: FSMContext):
+    instruction, _, _ = await get_channel_instruction()
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🏠 Главное меню", callback_data="back_to_start")]
+    ])
+    # Редактируем текущее сообщение, но добавим его в messages_to_delete перед редактированием
+    data = await state.get_data()
+    messages = data.get("messages_to_delete", [])
+    messages.append({"bot_msg_id": callback.message.message_id})
+    await state.update_data(messages_to_delete=messages)
+    
+    await callback.message.edit_text(
+        "✏️ Отредактируйте текст инструкции для канала (кнопка будет добавлена автоматически):\n\n"
+        f"{instruction}",
+        reply_markup=keyboard
+    )
+    await state.set_state(VacancyForm.edit_channel_instruction)
+    await callback.answer()
+
+@dp.callback_query(F.data == "edit_channel_button", F.from_user.id == ADMIN_ID)
+async def start_edit_channel_button(callback: CallbackQuery, state: FSMContext):
+    _, button_text, _ = await get_channel_instruction()
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🏠 Главное меню", callback_data="back_to_start")]
+    ])
+    # Редактируем текущее сообщение, но добавим его в messages_to_delete перед редактированием
+    data = await state.get_data()
+    messages = data.get("messages_to_delete", [])
+    messages.append({"bot_msg_id": callback.message.message_id})
+    await state.update_data(messages_to_delete=messages)
+    
+    await callback.message.edit_text(
+        f"🔗 Отредактируйте текст для кнопки в инструкции канала:\n\n{button_text}",
+        reply_markup=keyboard
+    )
+    await state.set_state(VacancyForm.edit_channel_button)
     await callback.answer()
 
 @dp.message(VacancyForm.edit_payment, F.from_user.id == ADMIN_ID)
@@ -291,25 +450,141 @@ async def process_new_payment_instructions(message: Message, state: FSMContext):
         [InlineKeyboardButton(text="📤 Создать вакансию", callback_data="start_form")],
         [InlineKeyboardButton(text="🏠 Главное меню", callback_data="back_to_start")]
     ])
-    await message.answer(
+    await send_and_log(
+        message.chat.id,
         f"💸 <b>Инструкции обновлены:</b>\n\n{message.text}\n\nОни будут показаны пользователям при выборе платной публикации.",
+        state,
         reply_markup=keyboard
     )
     await state.clear()
+
+@dp.message(VacancyForm.edit_channel_instruction, F.from_user.id == ADMIN_ID)
+async def process_new_channel_instruction(message: Message, state: FSMContext):
+    settings_collection.update_one(
+        {"key": "channel_instruction"},
+        {"$set": {"value": message.text}},
+        upsert=True
+    )
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👀 Просмотреть", callback_data="view_channel_instruction")],
+        [InlineKeyboardButton(text="📬 Опубликовать/Обновить", callback_data="post_channel_instruction")],
+        [InlineKeyboardButton(text="🏠 Главное меню", callback_data="back_to_start")]
+    ])
+    await send_and_log(
+        message.chat.id,
+        f"📢 <b>Инструкция для канала обновлена:</b>\n\n{message.text}\n\nТеперь вы можете опубликовать или обновить пост в канале.",
+        state,
+        reply_markup=keyboard
+    )
+    await state.clear()
+
+@dp.message(VacancyForm.edit_channel_button, F.from_user.id == ADMIN_ID)
+async def process_new_channel_button(message: Message, state: FSMContext):
+    settings_collection.update_one(
+        {"key": "channel_instruction"},
+        {"$set": {"button_text": message.text}},
+        upsert=True
+    )
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👀 Просмотреть", callback_data="view_channel_instruction")],
+        [InlineKeyboardButton(text="📬 Опубликовать/Обновить", callback_data="post_channel_instruction")],
+        [InlineKeyboardButton(text="🏠 Главное меню", callback_data="back_to_start")]
+    ])
+    await send_and_log(
+        message.chat.id,
+        f"🔗 <b>Текст кнопки обновлен:</b> {message.text}\n\nТеперь вы можете опубликовать или обновить пост в канале.",
+        state,
+        reply_markup=keyboard
+    )
+    await state.clear()
+
+async def check_channel_message():
+    _, _, message_id = await get_channel_instruction()
+    if message_id:
+        try:
+            await bot.get_chat(CHANNEL_ID)
+            await bot.get_chat_member(CHANNEL_ID, (await bot.get_me()).id)
+            await bot.forward_message(chat_id=ADMIN_ID, from_chat_id=CHANNEL_ID, message_id=message_id)
+            logger.info(f"Сообщение {message_id} всё ещё существует в канале")
+            return True
+        except Exception as e:
+            logger.warning(f"Сообщение {message_id} не найдено или удалено: {e}")
+            return False
+    return False
+
+async def post_channel_instruction(auto=False, chat_id=None, state=None):
+    instruction, button_text, _ = await get_channel_instruction()
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=button_text, url="https://t.me/rabota_minsk_bot")]
+    ])
+    try:
+        msg = await bot.send_message(CHANNEL_ID, instruction, reply_markup=keyboard)
+        settings_collection.update_one(
+            {"key": "channel_instruction"},
+            {"$set": {"message_id": msg.message_id}},
+            upsert=True
+        )
+        await bot.pin_chat_message(CHANNEL_ID, msg.message_id, disable_notification=True)
+        logger.info(f"{'Автоматически' if auto else ''} опубликован и закреплён пост с инструкцией в канале: {msg.message_id}")
+        
+        if chat_id and state:
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="👀 Просмотреть", callback_data="view_channel_instruction")],
+                [InlineKeyboardButton(text="✏️ Изменить текст", callback_data="edit_channel_instruction")],
+                [InlineKeyboardButton(text="🔗 Изменить кнопку", callback_data="edit_channel_button")],
+                [InlineKeyboardButton(text="🏠 Главное меню", callback_data="back_to_start")]
+            ])
+            await send_and_log(
+                chat_id,
+                "✅ <b>Инструкция успешно опубликована/обновлена и закреплена в канале!</b>",
+                state,
+                reply_markup=keyboard
+            )
+        return msg.message_id
+    except Exception as e:
+        logger.error(f"Ошибка при {'авто' if auto else ''}публикации инструкции в канале: {e}")
+        if chat_id and state:
+            await send_and_log(
+                chat_id,
+                "❌ Ошибка при публикации/обновлении инструкции. Проверьте права бота в канале.",
+                state,
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🏠 Главное меню", callback_data="back_to_start")]
+                ])
+            )
+        return None
+
+@dp.callback_query(F.data == "post_channel_instruction", F.from_user.id == ADMIN_ID)
+async def post_channel_instruction_manual(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    messages = data.get("messages_to_delete", [])
+    welcome_id = data.get("welcome_message_id")
+    vacancy_messages = data.get("vacancy_messages", [])
+
+    messages_to_delete = messages.copy()
+    messages_to_delete.append({"bot_msg_id": callback.message.message_id})
+    await delete_messages(callback.message.chat.id, messages_to_delete, welcome_id, vacancy_messages)
+    await state.update_data(messages_to_delete=messages_to_delete)
+
+    await post_channel_instruction(auto=False, chat_id=callback.message.chat.id, state=state)
+    await callback.answer()
+
+async def monitor_channel_instruction():
+    while True:
+        if not await check_channel_message():
+            await post_channel_instruction(auto=True)
+        await asyncio.sleep(3600)
 
 @dp.callback_query(F.data == "start_form")
 async def begin_form(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     welcome_id = data.get("welcome_message_id")
+    messages = data.get("messages_to_delete", [])
+    vacancy_messages = data.get("vacancy_messages", [])
     
-    for msg in data.get("messages_to_delete", []):
-        if msg["bot_msg_id"] != welcome_id:
-            try:
-                await bot.delete_message(callback.message.chat.id, msg["bot_msg_id"])
-                if "user_msg_id" in msg:
-                    await bot.delete_message(callback.message.chat.id, msg["user_msg_id"])
-            except:
-                pass
+    messages_to_delete = messages.copy()
+    messages_to_delete.append({"bot_msg_id": callback.message.message_id})
+    await delete_messages(callback.message.chat.id, messages_to_delete, welcome_id, vacancy_messages)
     await state.update_data(messages_to_delete=[{"bot_msg_id": welcome_id}] if welcome_id else [])
     
     try:
@@ -330,36 +605,102 @@ async def back_to_start(callback: CallbackQuery, state: FSMContext):
     messages = data.get("messages_to_delete", [])
     vacancy_messages = data.get("vacancy_messages", [])
     welcome_id = data.get("welcome_message_id")
-    
-    # Удаляем только невакансионные сообщения
-    for msg in messages[:]:
-        if "bot_msg_id" in msg and msg["bot_msg_id"] != welcome_id and msg["bot_msg_id"] not in vacancy_messages:
+
+    messages_to_delete = messages.copy()
+    messages_to_delete.append({"bot_msg_id": callback.message.message_id})
+    for msg in messages_to_delete:
+        bot_msg_id = msg.get("bot_msg_id") if isinstance(msg, dict) else None
+        user_msg_id = msg.get("user_msg_id") if isinstance(msg, dict) else None
+
+        if bot_msg_id and bot_msg_id != welcome_id:
             try:
-                await bot.delete_message(callback.message.chat.id, msg["bot_msg_id"])
-                logger.info(f"Удалено сообщение {msg['bot_msg_id']} из чата {callback.message.chat.id}")
-                if "user_msg_id" in msg:
-                    await bot.delete_message(callback.message.chat.id, msg["user_msg_id"])
-                    logger.info(f"Удалено пользовательское сообщение {msg['user_msg_id']} из чата {callback.message.chat.id}")
-                messages.remove(msg)
+                await bot.delete_message(callback.message.chat.id, bot_msg_id)
+                logger.info(f"Удалено сообщение {bot_msg_id} из чата {callback.message.chat.id}")
+                if user_msg_id:
+                    await bot.delete_message(callback.message.chat.id, user_msg_id)
+                    logger.info(f"Удалено пользовательское сообщение {user_msg_id} из чата {callback.message.chat.id}")
             except Exception as e:
-                logger.warning(f"Не удалось удалить сообщение {msg['bot_msg_id']}: {e}")
-    
-    await state.update_data(messages_to_delete=messages)
+                logger.warning(f"Не удалось удалить сообщение {bot_msg_id}: {e}")
+            finally:
+                if msg in messages:
+                    messages.remove(msg)
+
+    vacancy_messages_to_delete = vacancy_messages.copy()
+    for msg_id in vacancy_messages_to_delete:
+        if msg_id != welcome_id:
+            try:
+                await bot.delete_message(callback.message.chat.id, msg_id)
+                logger.info(f"Удалено сообщение вакансии {msg_id} из чата {callback.message.chat.id}")
+                vacancy_messages.remove(msg_id)
+            except Exception as e:
+                logger.warning(f"Не удалось удалить сообщение вакансии {msg_id}: {e}")
+
+    await state.update_data(messages_to_delete=messages, vacancy_messages=vacancy_messages)
     
     if callback.from_user.id == ADMIN_ID:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="👀 Платежные инструкции", callback_data="view_payment")],
-            [InlineKeyboardButton(text="✏️ Изменить инструкции", callback_data="edit_payment")],
+            [InlineKeyboardButton(text="✏️ Изменить платежные инструкции", callback_data="edit_payment")],
+            [InlineKeyboardButton(text="📝 Инструкция в канале", callback_data="view_channel_instruction")],
+            [InlineKeyboardButton(text="📬 Опубликовать инструкцию в канале", callback_data="post_channel_instruction")],
             [InlineKeyboardButton(text="📤 Создать вакансию", callback_data="start_form")],
             [InlineKeyboardButton(text="📋 Все вакансии", callback_data="admin_view_vacancies|0")]
         ])
-        await send_and_log(callback.message.chat.id, "🌟 <b>Панель администратора</b> 🌟\n\nВыберите действие:", state, reply_markup=keyboard)
+        if welcome_id:
+            try:
+                await bot.edit_message_text(
+                    chat_id=callback.message.chat.id,
+                    message_id=welcome_id,
+                    text="🌟 <b>Панель администратора</b> 🌟\n\nВыберите действие:",
+                    reply_markup=keyboard
+                )
+            except Exception as e:
+                logger.warning(f"Не удалось отредактировать сообщение {welcome_id}: {e}")
+                welcome_msg = await send_and_log(
+                    callback.message.chat.id,
+                    "🌟 <b>Панель администратора</b> 🌟\n\nВыберите действие:",
+                    state,
+                    reply_markup=keyboard
+                )
+                await state.update_data(welcome_message_id=welcome_msg.message_id)
+        else:
+            welcome_msg = await send_and_log(
+                callback.message.chat.id,
+                "🌟 <b>Панель администратора</b> 🌟\n\nВыберите действие:",
+                state,
+                reply_markup=keyboard
+            )
+            await state.update_data(welcome_message_id=welcome_msg.message_id)
     else:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="📤 Создать вакансию", callback_data="start_form")],
             [InlineKeyboardButton(text="📜 Мои вакансии", callback_data="view_my_vacancies|0")]
         ])
-        await send_and_log(callback.message.chat.id, "🌟 <b>Вернулись в главное меню</b> 🌟\n\nЧто хотите сделать?", state, reply_markup=keyboard)
+        if welcome_id:
+            try:
+                await bot.edit_message_text(
+                    chat_id=callback.message.chat.id,
+                    message_id=welcome_id,
+                    text="🌟 <b>Вернулись в главное меню</b> 🌟\n\nЧто хотите сделать?",
+                    reply_markup=keyboard
+                )
+            except Exception as e:
+                logger.warning(f"Не удалось отредактировать сообщение {welcome_id}: {e}")
+                welcome_msg = await send_and_log(
+                    callback.message.chat.id,
+                    "🌟 <b>Вернулись в главное меню</b> 🌟\n\nЧто хотите сделать?",
+                    state,
+                    reply_markup=keyboard
+                )
+                await state.update_data(welcome_message_id=welcome_msg.message_id)
+        else:
+            welcome_msg = await send_and_log(
+                callback.message.chat.id,
+                "🌟 <b>Вернулись в главное меню</b> 🌟\n\nЧто хотите сделать?",
+                state,
+                reply_markup=keyboard
+            )
+            await state.update_data(welcome_message_id=welcome_msg.message_id)
     
     await state.clear()
     logger.info(f"Завершена обработка back_to_start для пользователя {callback.from_user.id}")
@@ -498,7 +839,7 @@ async def process_employment(message: Message, state: FSMContext):
         [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_employment")],
         [InlineKeyboardButton(text="🏠 Главное меню", callback_data="back_to_start")]
     ])
-    await send_and_log(message.chat.id, "📝 <b>Шаг 5/5:</b>  Укажите вид контактной связи с работодателем (Номер телефона или username в Telegram):", state, reply_markup=keyboard)
+    await send_and_log(message.chat.id, "📝 <b>Шаг 5/5:</b> Укажите вид контактной связи с работодателем (Номер телефона или username в Telegram):", state, reply_markup=keyboard)
     await state.set_state(VacancyForm.link)
 
 @dp.callback_query(F.data == "back_to_employment")
@@ -666,14 +1007,9 @@ async def send_to_admin(callback: CallbackQuery, state: FSMContext):
     
     data = await state.get_data()
     welcome_id = data.get("welcome_message_id")
-    for msg in data.get("messages_to_delete", []):
-        if msg["bot_msg_id"] != welcome_id:
-            try:
-                await bot.delete_message(callback.message.chat.id, msg["bot_msg_id"])
-                if "user_msg_id" in msg:
-                    await bot.delete_message(callback.message.chat.id, msg["user_msg_id"])
-            except:
-                pass
+    messages = data.get("messages_to_delete", [])
+    vacancy_messages = data.get("vacancy_messages", [])
+    await delete_messages(callback.message.chat.id, messages, welcome_id, vacancy_messages)
     await state.update_data(messages_to_delete=[{"bot_msg_id": welcome_id}] if welcome_id else [])
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -689,14 +1025,22 @@ async def approve_vacancy(callback: CallbackQuery, state: FSMContext):
     vacancy_data = vacancies_collection.find_one({"_id": ObjectId(vacancy_id)})
     
     if not vacancy_data:
-        await callback.message.answer("❌ Ошибка: вакансия не найдена.")
+        await send_and_log(
+            callback.message.chat.id,
+            "❌ Ошибка: вакансия не найдена.",
+            state
+        )
         return
     
     user_id = vacancy_data.get("user_id")
     channel_message_id = vacancy_data.get("channel_message_id")
     
     if not user_id:
-        await callback.message.answer("❌ Ошибка: пользователь не найден.")
+        await send_and_log(
+            callback.message.chat.id,
+            "❌ Ошибка: пользователь не найден.",
+            state
+        )
         return
     
     channel_vacancy_text = (
@@ -727,12 +1071,20 @@ async def decline_vacancy(callback: CallbackQuery, state: FSMContext):
     vacancy_data = vacancies_collection.find_one({"_id": ObjectId(vacancy_id)})
     
     if not vacancy_data:
-        await callback.message.answer("❌ Ошибка: вакансия не найдена.")
+        await send_and_log(
+            callback.message.chat.id,
+            "❌ Ошибка: вакансия не найдена.",
+            state
+        )
         return
     
     user_id = vacancy_data.get("user_id")
     if not user_id:
-        await callback.message.answer("❌ Ошибка: пользователь не найден.")
+        await send_and_log(
+            callback.message.chat.id,
+            "❌ Ошибка: пользователь не найден.",
+            state
+        )
         return
     
     vacancies_collection.update_one(
@@ -747,7 +1099,11 @@ async def decline_vacancy(callback: CallbackQuery, state: FSMContext):
     ])
     await send_and_log(user_id, f"❌ <b>Ваша вакансия \"{vacancy_data.get('title')}\" отклонена.</b>", user_state, reply_markup=keyboard)
     await callback.message.edit_reply_markup(reply_markup=None)
-    await callback.message.answer("✅ Вакансия отклонена.")
+    await send_and_log(
+        callback.message.chat.id,
+        "✅ Вакансия отклонена.",
+        state
+    )
 
 @dp.callback_query(F.data.startswith("delete_vacancy"))
 async def delete_vacancy(callback: CallbackQuery, state: FSMContext):
@@ -759,7 +1115,11 @@ async def delete_vacancy(callback: CallbackQuery, state: FSMContext):
     vacancy_data = vacancies_collection.find_one({"_id": ObjectId(vacancy_id)})
     
     if not vacancy_data:
-        await callback.message.answer("❌ Ошибка: вакансия не найдена.")
+        await send_and_log(
+            callback.message.chat.id,
+            "❌ Ошибка: вакансия не найдена.",
+            state
+        )
         return
     
     user_id = vacancy_data.get("user_id")
@@ -782,9 +1142,14 @@ async def delete_vacancy(callback: CallbackQuery, state: FSMContext):
     vacancies_collection.delete_one({"_id": ObjectId(vacancy_id)})
     
     await callback.message.edit_reply_markup(reply_markup=None)
-    await callback.message.answer("🗑 Вакансия успешно удалена.")
+    await send_and_log(
+        callback.message.chat.id,
+        "🗑 Вакансия успешно удалена.",
+        state
+    )
 
 async def main():
+    asyncio.create_task(monitor_channel_instruction())
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
