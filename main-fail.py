@@ -19,9 +19,14 @@ import aiohttp
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-API_TOKEN = "7652183042:AAHkGYirAKyb8iww0OAjQciL0MRHzbrtICQ"
-ADMIN_ID = 685600785
-CHANNEL_ID = "@rabota_minsk"
+API_TOKEN = "7898171758:AAGodbxpbofXC568XzgJ7VPLiJ-flt8YokU"
+ADMIN_ID = 349177382
+CHANNEL_ID = "@vacancy228"
+
+
+# API_TOKEN = "7652183042:AAHkGYirAKyb8iww0OAjQciL0MRHzbrtICQ"
+# ADMIN_ID = 685600785
+# CHANNEL_ID = "@rabota_minsk"
 
 # Подключение к MongoDB
 client = MongoClient("mongodb://localhost:27017/")
@@ -465,18 +470,55 @@ async def process_new_channel_instruction(message: Message, state: FSMContext):
         {"$set": {"value": message.text}},
         upsert=True
     )
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👀 Просмотреть", callback_data="view_channel_instruction")],
-        [InlineKeyboardButton(text="📬 Опубликовать/Обновить", callback_data="post_channel_instruction")],
-        [InlineKeyboardButton(text="🏠 Главное меню", callback_data="back_to_start")]
-    ])
-    await send_and_log(
-        message.chat.id,
-        f"📢 <b>Инструкция для канала обновлена:</b>\n\n{message.text}\n\nТеперь вы можете опубликовать или обновить пост в канале.",
-        state,
-        reply_markup=keyboard
-    )
+    # Получаем данные состояния
+    data = await state.get_data()
+    messages = data.get("messages_to_delete", [])
+    vacancy_messages = data.get("vacancy_messages", [])
+    welcome_id = data.get("welcome_message_id")
+
+    # Удаляем все сообщения, кроме welcome_id
+    messages_to_delete = messages.copy()
+    messages_to_delete.append({"bot_msg_id": message.message_id})  # Добавляем сообщение пользователя
+    await delete_messages(message.chat.id, messages_to_delete, welcome_id, vacancy_messages)
+
+    # Очищаем состояние
     await state.clear()
+    await state.update_data(messages_to_delete=[{"bot_msg_id": welcome_id}] if welcome_id else [])
+
+    # Отображаем главное меню админа
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👀 Платежные инструкции", callback_data="view_payment")],
+        [InlineKeyboardButton(text="✏️ Изменить платежные инструкции", callback_data="edit_payment")],
+        [InlineKeyboardButton(text="📝 Инструкция в канале", callback_data="view_channel_instruction")],
+        [InlineKeyboardButton(text="📬 Опубликовать инструкцию в канале", callback_data="post_channel_instruction")],
+        [InlineKeyboardButton(text="📤 Создать вакансию", callback_data="start_form")],
+        [InlineKeyboardButton(text="📋 Все вакансии", callback_data="admin_view_vacancies|0")]
+    ])
+    if welcome_id:
+        try:
+            await bot.edit_message_text(
+                chat_id=message.chat.id,
+                message_id=welcome_id,
+                text="🌟 <b>Панель администратора</b> 🌟\n\nВыберите действие:",
+                reply_markup=keyboard
+            )
+        except Exception as e:
+            logger.warning(f"Не удалось отредактировать сообщение {welcome_id}: {e}")
+            welcome_msg = await send_and_log(
+                message.chat.id,
+                "🌟 <b>Панель администратора</b> 🌟\n\nВыберите действие:",
+                state,
+                reply_markup=keyboard
+            )
+            await state.update_data(welcome_message_id=welcome_msg.message_id)
+    else:
+        welcome_msg = await send_and_log(
+            message.chat.id,
+            "🌟 <b>Панель администратора</b> 🌟\n\nВыберите действие:",
+            state,
+            reply_markup=keyboard
+        )
+        await state.update_data(welcome_message_id=welcome_msg.message_id)
 
 @dp.message(VacancyForm.edit_channel_button, F.from_user.id == ADMIN_ID)
 async def process_new_channel_button(message: Message, state: FSMContext):
@@ -485,39 +527,132 @@ async def process_new_channel_button(message: Message, state: FSMContext):
         {"$set": {"button_text": message.text}},
         upsert=True
     )
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👀 Просмотреть", callback_data="view_channel_instruction")],
-        [InlineKeyboardButton(text="📬 Опубликовать/Обновить", callback_data="post_channel_instruction")],
-        [InlineKeyboardButton(text="🏠 Главное меню", callback_data="back_to_start")]
-    ])
-    await send_and_log(
-        message.chat.id,
-        f"🔗 <b>Текст кнопки обновлен:</b> {message.text}\n\nТеперь вы можете опубликовать или обновить пост в канале.",
-        state,
-        reply_markup=keyboard
-    )
+    # Получаем данные состояния
+    data = await state.get_data()
+    messages = data.get("messages_to_delete", [])
+    vacancy_messages = data.get("vacancy_messages", [])
+    welcome_id = data.get("welcome_message_id")
+
+    # Удаляем все сообщения, кроме welcome_id
+    messages_to_delete = messages.copy()
+    messages_to_delete.append({"bot_msg_id": message.message_id})  # Добавляем сообщение пользователя
+    await delete_messages(message.chat.id, messages_to_delete, welcome_id, vacancy_messages)
+
+    # Очищаем состояние
     await state.clear()
+    await state.update_data(messages_to_delete=[{"bot_msg_id": welcome_id}] if welcome_id else [])
+
+    # Отображаем главное меню админа
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👀 Платежные инструкции", callback_data="view_payment")],
+        [InlineKeyboardButton(text="✏️ Изменить платежные инструкции", callback_data="edit_payment")],
+        [InlineKeyboardButton(text="📝 Инструкция в канале", callback_data="view_channel_instruction")],
+        [InlineKeyboardButton(text="📬 Опубликовать инструкцию в канале", callback_data="post_channel_instruction")],
+        [InlineKeyboardButton(text="📤 Создать вакансию", callback_data="start_form")],
+        [InlineKeyboardButton(text="📋 Все вакансии", callback_data="admin_view_vacancies|0")]
+    ])
+    if welcome_id:
+        try:
+            await bot.edit_message_text(
+                chat_id=message.chat.id,
+                message_id=welcome_id,
+                text="🌟 <b>Панель администратора</b> 🌟\n\nВыберите действие:",
+                reply_markup=keyboard
+            )
+        except Exception as e:
+            logger.warning(f"Не удалось отредактировать сообщение {welcome_id}: {e}")
+            welcome_msg = await send_and_log(
+                message.chat.id,
+                "🌟 <b>Панель администратора</b> 🌟\n\nВыберите действие:",
+                state,
+                reply_markup=keyboard
+            )
+            await state.update_data(welcome_message_id=welcome_msg.message_id)
+    else:
+        welcome_msg = await send_and_log(
+            message.chat.id,
+            "🌟 <b>Панель администратора</b> 🌟\n\nВыберите действие:",
+            state,
+            reply_markup=keyboard
+        )
+        await state.update_data(welcome_message_id=welcome_msg.message_id)
 
 async def check_channel_message():
     _, _, message_id = await get_channel_instruction()
-    if message_id:
+    if not message_id:
+        logger.info("Сообщение не найдено в базе данных, требуется публикация нового сообщения.")
+        return None  # Возвращаем None, если сообщения нет
+
+    try:
+        # Проверяем, существует ли канал и есть ли у бота права
+        chat = await bot.get_chat(CHANNEL_ID)
+        if chat.type not in ["channel", "supergroup"]:
+            logger.error(f"CHANNEL_ID {CHANNEL_ID} не является каналом или супергруппой.")
+            return None
+
+        chat_member = await bot.get_chat_member(CHANNEL_ID, (await bot.get_me()).id)
+        if chat_member.status not in ["administrator", "creator"]:
+            logger.error("Бот не имеет прав администратора в канале. Требуются права для чтения, редактирования и закрепления сообщений.")
+            return None
+
+        # Проверяем, существует ли сообщение
         try:
-            await bot.get_chat(CHANNEL_ID)
-            await bot.get_chat_member(CHANNEL_ID, (await bot.get_me()).id)
-            await bot.forward_message(chat_id=ADMIN_ID, from_chat_id=CHANNEL_ID, message_id=message_id)
-            logger.info(f"Сообщение {message_id} всё ещё существует в канале")
-            return True
+            message = await bot.get_chat(CHANNEL_ID)  # Проверяем доступ к чату
+            # Проверяем, закреплено ли сообщение
+            if chat.pinned_message and chat.pinned_message.message_id == message_id:
+                logger.info(f"Закреплённое сообщение {message_id} всё ещё существует в канале.")
+                return message_id  # Сообщение существует и закреплено
+            else:
+                logger.warning(f"Сообщение {message_id} не является закреплённым в канале.")
+                return None  # Сообщение не закреплено
         except Exception as e:
-            logger.warning(f"Сообщение {message_id} не найдено или удалено: {e}")
-            return False
-    return False
+            logger.warning(f"Сообщение {message_id} не найдено в канале или недоступно: {e}")
+            return None  # Сообщение недоступно
+    except Exception as e:
+        logger.warning(f"Ошибка при проверке канала {CHANNEL_ID}: {e}")
+        return None
 
 async def post_channel_instruction(auto=False, chat_id=None, state=None):
-    instruction, button_text, _ = await get_channel_instruction()
+    instruction, button_text, message_id = await get_channel_instruction()
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=button_text, url="https://t.me/rabota_minsk_bot")]
     ])
     try:
+        # Проверяем, существует ли уже закреплённое сообщение
+        existing_message_id = await check_channel_message()
+        if existing_message_id:
+            # Если сообщение существует и закреплено, редактируем его
+            try:
+                await bot.edit_message_text(
+                    chat_id=CHANNEL_ID,
+                    message_id=existing_message_id,
+                    text=instruction,
+                    reply_markup=keyboard
+                )
+                logger.info(f"{'Автоматически' if auto else ''} отредактировано сообщение с инструкцией в канале: {existing_message_id}")
+                return existing_message_id
+            except Exception as e:
+                logger.warning(f"Не удалось отредактировать сообщение {existing_message_id}: {e}")
+                # Если не удалось отредактировать, попробуем удалить и открепить
+                try:
+                    await bot.delete_message(CHANNEL_ID, existing_message_id)
+                    logger.info(f"Удалено старое сообщение {existing_message_id} из канала")
+                except Exception as e:
+                    logger.warning(f"Не удалось удалить сообщение {existing_message_id}: {e}")
+                try:
+                    await bot.unpin_chat_message(CHANNEL_ID, existing_message_id)
+                    logger.info(f"Откреплено старое сообщение {existing_message_id}")
+                except Exception as e:
+                    logger.warning(f"Не удалось открепить сообщение {existing_message_id}: {e}")
+
+        # Очищаем message_id в базе, так как старое сообщение либо отредактировано, либо удалено
+        settings_collection.update_one(
+            {"key": "channel_instruction"},
+            {"$set": {"message_id": None}},
+            upsert=True
+        )
+
+        # Публикуем новое сообщение
         msg = await bot.send_message(CHANNEL_ID, instruction, reply_markup=keyboard)
         settings_collection.update_one(
             {"key": "channel_instruction"},
@@ -525,9 +660,10 @@ async def post_channel_instruction(auto=False, chat_id=None, state=None):
             upsert=True
         )
         await bot.pin_chat_message(CHANNEL_ID, msg.message_id, disable_notification=True)
-        logger.info(f"{'Автоматически' if auto else ''} опубликован и закреплён пост с инструкцией в канале: {msg.message_id}")
+        logger.info(f"{'Автоматически' if auto else ''} опубликован и закреплён новый пост с инструкцией в канале: {msg.message_id}")
         
-        if chat_id and state:
+        # Отправляем уведомление админу только при ручном вызове
+        if chat_id and state and not auto:
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="👀 Просмотреть", callback_data="view_channel_instruction")],
                 [InlineKeyboardButton(text="✏️ Изменить текст", callback_data="edit_channel_instruction")],
@@ -543,7 +679,7 @@ async def post_channel_instruction(auto=False, chat_id=None, state=None):
         return msg.message_id
     except Exception as e:
         logger.error(f"Ошибка при {'авто' if auto else ''}публикации инструкции в канале: {e}")
-        if chat_id and state:
+        if chat_id and state and not auto:
             await send_and_log(
                 chat_id,
                 "❌ Ошибка при публикации/обновлении инструкции. Проверьте права бота в канале.",
