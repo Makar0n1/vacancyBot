@@ -19,14 +19,12 @@ import aiohttp
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-API_TOKEN = "7898171758:AAGodbxpbofXC568XzgJ7VPLiJ-flt8YokU"
-ADMIN_ID = 349177382
-CHANNEL_ID = "@vacancy228"
-
-
-# API_TOKEN = "7652183042:AAHkGYirAKyb8iww0OAjQciL0MRHzbrtICQ"
-# ADMIN_ID = 685600785
-# CHANNEL_ID = "@rabota_minsk"
+# API_TOKEN = "7898171758:AAGodbxpbofXC568XzgJ7VPLiJ-flt8YokU"
+# ADMIN_ID = 349177382
+# CHANNEL_ID = "@vacancy228"
+API_TOKEN = "7652183042:AAHkGYirAKyb8iww0OAjQciL0MRHzbrtICQ"
+ADMIN_ID = 685600785
+CHANNEL_ID = "@rabota_minsk"
 
 # Подключение к MongoDB
 client = MongoClient("mongodb://localhost:27017/")
